@@ -29,7 +29,7 @@ from core import get_conn
 # Mapa slug → classe scraper
 # Adicionar nova fonte: registrar aqui e criar o scraper em scrapers/
 # -----------------------------------------------------------------------------
-SCRAPER_POR_SLUG: dict[str, type] = {
+SCRAPER_POR_SLUG: Dict[str, Type[BaseScraper]] = {
     "reuters-commodities":  ReutersScraper,
     "icis":                 IcisScraper,
     "plastics-news":        PlasticsNewsScraper,
