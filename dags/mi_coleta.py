@@ -1,28 +1,46 @@
 """
 DAG: mi_coleta
 Descrição: Coleta diária de notícias de todas as fontes ativas.
-Agendamento: diário às 06h00 (horário de Brasília / America/Sao_Paulo)
+Agendamento: diário às 06h00 BRT (09h UTC)
+
+As fontes são resolvidas dinamicamente do banco — nenhum slug ou ID
+está hardcoded aqui. Para adicionar uma nova fonte: cadastre em mi.fontes
+e crie o scraper correspondente no mapa SCRAPER_POR_SLUG abaixo.
 """
 
-import sys
 import os
+import sys
 from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.utils.email import send_email
 
-# Adiciona o diretório do projeto ao path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scrapers.reuters import ReutersScraper
-from scrapers.icis import IcisScraper
-from scrapers.rss_scrapers import PlasticsNewsScraper, BloombergScraper, FinancialTimesScraper
-from scrapers.api_scrapers import WorldBankScraper, TradeMapScraper, AbiplastScraper, AbiquimScraper
+from scrapers import (
+    ReutersScraper, IcisScraper, PlasticsNewsScraper,
+    BloombergScraper, FinancialTimesScraper,
+    WorldBankScraper, TradeMapScraper,
+    AbiplastScraper, AbiquimScraper,
+)
+from core import get_conn
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Configurações padrão
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Mapa slug → classe scraper
+# Adicionar nova fonte: registrar aqui e criar o scraper em scrapers/
+# -----------------------------------------------------------------------------
+SCRAPER_POR_SLUG: dict[str, type] = {
+    "reuters-commodities":  ReutersScraper,
+    "icis":                 IcisScraper,
+    "plastics-news":        PlasticsNewsScraper,
+    "bloomberg":            BloombergScraper,
+    "financial-times":      FinancialTimesScraper,
+    "world-bank":           WorldBankScraper,
+    "trademap":             TradeMapScraper,
+    "abiplast":             AbiplastScraper,
+    "abiquim":              AbiquimScraper,
+}
+
 DEFAULT_ARGS = {
     "owner": "antonio.mano",
     "depends_on_past": False,
@@ -33,66 +51,67 @@ DEFAULT_ARGS = {
     "email": [os.getenv("SMTP_FROM", "ti@lorenzetti.com.br")],
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Mapa de scrapers ativos
-# ─────────────────────────────────────────────────────────────────────────────
-SCRAPERS = {
-    "reuters":        ReutersScraper,
-    "icis":           IcisScraper,
-    "plastics_news":  PlasticsNewsScraper,
-    "world_bank":     WorldBankScraper,
-    "trademap":       TradeMapScraper,
-    "bloomberg":      BloombergScraper,
-    "financial_times": FinancialTimesScraper,
-    "abiplast":       AbiplastScraper,
-    "abiquim":        AbiquimScraper,
-}
 
-
-def executar_scraper(fonte_key: str, **context) -> dict:
-    """Task callable: instancia e executa o scraper de uma fonte."""
-    import psycopg2
+def executar_coleta(slug: str, **context) -> dict:
+    """
+    Task callable: instancia o scraper pelo slug e executa a coleta.
+    Registra resultado em mi.execucoes_log.
+    """
+    from datetime import timezone
     from loguru import logger
 
-    scraper_cls = SCRAPERS[fonte_key]
-    scraper = scraper_cls()
+    if slug not in SCRAPER_POR_SLUG:
+        raise ValueError(f"Slug '{slug}' não mapeado em SCRAPER_POR_SLUG.")
 
-    inicio = datetime.utcnow()
+    scraper = SCRAPER_POR_SLUG[slug]()
+    inicio = datetime.now(tz=timezone.utc)
+    status, novos, erro = "success", 0, None
+
     try:
         novos = scraper.executar()
-        status = "success"
-        erro = None
-    except Exception as e:
-        novos = 0
+    except Exception as exc:
         status = "error"
-        erro = str(e)
-        logger.error(f"[{fonte_key}] Falha na coleta: {e}")
+        erro = str(exc)
+        logger.error(f"[{slug}] Falha na coleta: {exc}")
         raise
+    finally:
+        # Registra no log independente de sucesso ou falha
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO mi.execucoes_log
+                        (dag_id, fonte_id, status, qtd_novos, erro, iniciado_em, finalizado_em)
+                    SELECT
+                        %s,
+                        (SELECT id FROM mi.fontes WHERE slug = %s),
+                        %s::mi.status_execucao,
+                        %s,
+                        %s,
+                        %s,
+                        NOW()
+                    """,
+                    ("mi_coleta", slug, status, novos, erro, inicio),
+                )
+            conn.commit()
 
-    # Registra no log
-    conn = psycopg2.connect(
-        host=os.getenv("DB_HOST"), port=os.getenv("DB_PORT"),
-        dbname=os.getenv("DB_NAME"), user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-    )
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO mi_coletas_log
-                (dag_id, fonte_id, status, qtd_novos, mensagem_erro, iniciado_em, finalizado_em)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            """,
-            ("mi_coleta", scraper.fonte_id, status, novos, erro, inicio, datetime.utcnow()),
-        )
-        conn.commit()
-    conn.close()
-
-    return {"fonte": fonte_key, "novos": novos, "status": status}
+    return {"slug": slug, "novos": novos, "status": status}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+def carregar_fontes_ativas() -> list[str]:
+    """
+    Retorna slugs das fontes ativas no banco que possuem scraper mapeado.
+    Nunca hardcoded — sempre lido do banco em runtime.
+    """
+    from core.fontes_repo import listar_ativas
+    ativas = listar_ativas()
+    return [f.slug for f in ativas if f.slug in SCRAPER_POR_SLUG]
+
+
+# -----------------------------------------------------------------------------
 # Definição da DAG
-# ─────────────────────────────────────────────────────────────────────────────
+# As tasks são criadas dinamicamente com base nas fontes ativas no banco.
+# -----------------------------------------------------------------------------
 with DAG(
     dag_id="mi_coleta",
     description="Market Intelligence — Coleta diária de notícias",
@@ -104,11 +123,12 @@ with DAG(
     tags=["market-intelligence", "coleta"],
 ) as dag:
 
-    tarefas = {}
-    for fonte_key in SCRAPERS:
-        tarefas[fonte_key] = PythonOperator(
-            task_id=f"coletar_{fonte_key}",
-            python_callable=executar_scraper,
-            op_kwargs={"fonte_key": fonte_key},
-            pool="mi_scrapers",   # criar pool no Airflow com 3 slots para controle de paralelismo
+    slugs_ativos = carregar_fontes_ativas()
+
+    for slug in slugs_ativos:
+        PythonOperator(
+            task_id=f"coletar_{slug.replace('-', '_')}",
+            python_callable=executar_coleta,
+            op_kwargs={"slug": slug},
+            pool="mi_scrapers",   # pool com 3 slots — criar no Airflow Admin
         )

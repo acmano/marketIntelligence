@@ -1,103 +1,119 @@
 """
-Base scraper — interface comum para todos os coletores de fontes.
-Todos os scrapers devem herdar desta classe e implementar o método `coletar()`.
+Classe base para todos os scrapers do Market Intelligence.
+
+Design principles:
+- Scrapers não conhecem IDs, SQL ou detalhes de banco
+- Toda persistência é delegada ao repositório (core.artigos_repo)
+- A fonte é resolvida pelo slug estável em runtime
+- Retry automático com backoff exponencial via tenacity
 """
 
-import os
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-import psycopg2
-from dotenv import load_dotenv
 from loguru import logger
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception_type,
+    stop_after_attempt,
+    wait_exponential,
+    before_sleep_log,
+    RetryError,
+)
+import logging
 
-load_dotenv()
+from core.fontes_repo import Fonte, get_by_slug
+from core.artigos_repo import ArtigoNovo, salvar_artigos
 
 
 @dataclass
-class Artigo:
-    """Representa um artigo coletado de uma fonte."""
+class ArtigoColetado:
+    """
+    DTO de saída dos scrapers.
+    Contém apenas dados de domínio — sem IDs de banco.
+    O repositório resolve o fonte_id a partir do slug da Fonte.
+    """
     titulo: str
     url: str
-    fonte_id: int
     texto_bruto: Optional[str] = None
     data_publicacao: Optional[datetime] = None
 
 
 class BaseScraper(ABC):
     """
-    Interface base para todos os scrapers do Market Intelligence.
+    Interface base para todos os coletores de fontes.
 
-    Cada scraper de fonte deve:
-    1. Herdar desta classe
-    2. Implementar o método `coletar()` retornando lista de Artigo
-    3. Chamar `self.salvar(artigos)` ao final
+    Subclasses devem:
+      1. Chamar super().__init__(slug='meu-slug')
+      2. Implementar coletar() retornando list[ArtigoColetado]
+
+    O slug deve corresponder exatamente ao campo slug cadastrado em mi.fontes.
+    Nunca hardcode o UUID da fonte — ele é resolvido automaticamente.
     """
 
-    def __init__(self, fonte_id: int, nome: str):
-        self.fonte_id = fonte_id
-        self.nome = nome
-        self.conn = None
+    def __init__(self, slug: str) -> None:
+        self._slug = slug
+        self._fonte: Optional[Fonte] = None   # resolvido lazy no primeiro uso
 
-    def _get_conn(self):
-        if self.conn is None or self.conn.closed:
-            self.conn = psycopg2.connect(
-                host=os.getenv("DB_HOST", "localhost"),
-                port=int(os.getenv("DB_PORT", 5432)),
-                dbname=os.getenv("DB_NAME"),
-                user=os.getenv("DB_USER"),
-                password=os.getenv("DB_PASSWORD"),
-            )
-        return self.conn
+    @property
+    def fonte(self) -> Fonte:
+        """Resolve a Fonte pelo slug na primeira chamada (lazy + cached)."""
+        if self._fonte is None:
+            self._fonte = get_by_slug(self._slug)
+        return self._fonte
+
+    @property
+    def nome(self) -> str:
+        return self.fonte.nome
 
     @abstractmethod
-    def coletar(self) -> list[Artigo]:
-        """Coleta artigos da fonte. Deve ser implementado por cada subclasse."""
+    def coletar(self) -> list[ArtigoColetado]:
+        """
+        Coleta artigos da fonte externa.
+        Deve retornar apenas ArtigoColetado — sem lógica de banco.
+        """
         raise NotImplementedError
 
-    def salvar(self, artigos: list[Artigo]) -> int:
-        """
-        Persiste os artigos no banco, ignorando duplicatas (por URL).
-        Retorna o número de artigos novos inseridos.
-        """
+    def _persistir(self, artigos: list[ArtigoColetado]) -> int:
+        """Converte ArtigoColetado → ArtigoNovo e delega ao repositório."""
         if not artigos:
-            logger.info(f"[{self.nome}] Nenhum artigo para salvar.")
+            logger.info(f"[{self.nome}] Nenhum artigo para persistir.")
             return 0
 
-        conn = self._get_conn()
-        novos = 0
-        with conn.cursor() as cur:
-            for a in artigos:
-                try:
-                    cur.execute(
-                        """
-                        INSERT INTO mi_artigos (fonte_id, titulo, url, texto_bruto, data_publicacao)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (url) DO NOTHING
-                        """,
-                        (a.fonte_id, a.titulo, a.url, a.texto_bruto, a.data_publicacao),
-                    )
-                    if cur.rowcount > 0:
-                        novos += 1
-                except Exception as e:
-                    logger.warning(f"[{self.nome}] Erro ao salvar artigo '{a.url}': {e}")
-            conn.commit()
+        dtos = [
+            ArtigoNovo(
+                fonte_id=self.fonte.id,
+                titulo=a.titulo,
+                url=a.url,
+                texto_bruto=a.texto_bruto,
+                data_publicacao=a.data_publicacao,
+            )
+            for a in artigos
+        ]
 
-        logger.info(f"[{self.nome}] {novos} novos artigos de {len(artigos)} coletados.")
+        novos = salvar_artigos(dtos)
+        logger.info(f"[{self.nome}] {novos} novos de {len(artigos)} coletados.")
         return novos
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=30))
+    @retry(
+        retry=retry_if_exception_type(Exception),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+        reraise=True,
+    )
     def executar(self) -> int:
-        """Executa coleta completa com retry automático. Retorna qtd de novos artigos."""
-        logger.info(f"[{self.nome}] Iniciando coleta...")
+        """
+        Ponto de entrada principal.
+        Executa coleta + persistência com retry automático.
+        Retorna número de artigos novos inseridos.
+        """
+        logger.info(f"[{self.nome}] Iniciando coleta (slug={self._slug})...")
         artigos = self.coletar()
-        novos = self.salvar(artigos)
-        logger.info(f"[{self.nome}] Coleta concluída. {novos} novos artigos.")
+        novos = self._persistir(artigos)
+        logger.info(f"[{self.nome}] Concluído. {novos} artigos novos.")
         return novos
-
-    def __del__(self):
-        if self.conn and not self.conn.closed:
-            self.conn.close()
