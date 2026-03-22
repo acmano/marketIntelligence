@@ -1,0 +1,38 @@
+# ─────────────────────────────────────────────
+# Market Intelligence — Dependências Python
+# ─────────────────────────────────────────────
+
+# Airflow (instalar separadamente via pip install apache-airflow)
+# apache-airflow==2.9.0
+
+# HTTP e parsing
+requests==2.31.0
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+lxml==5.2.1
+
+# PostgreSQL
+psycopg2-binary==2.9.9
+
+# IA — Anthropic
+anthropic==0.28.0
+
+# IA — OpenAI (embeddings)
+openai==1.30.0
+
+# Geração de PowerPoint
+python-pptx==0.6.23
+
+# Agente conversacional MVP
+streamlit==1.35.0
+
+# Utilitários
+python-dotenv==1.0.1
+tenacity==8.3.0        # retry automático com backoff
+loguru==0.7.2          # logging aprimorado
+schedule==1.2.1        # agendamento simples para testes locais
+
+# Testes
+pytest==8.2.0
+pytest-mock==3.14.0
+responses==0.25.0      # mock de chamadas HTTP

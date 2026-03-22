@@ -1,0 +1,39 @@
+# Ambiente
+.env
+.env.local
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Dependências
+*.egg-info/
+dist/
+build/
+
+# Logs
+logs/
+*.log
+airflow_logs/
+
+# Outputs gerados
+output/
+reports/*.pptx
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Segredos (nunca commitar)
+*.pem
+*.key
+secrets/
