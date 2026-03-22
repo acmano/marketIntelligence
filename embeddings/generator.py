@@ -21,14 +21,14 @@ def _get_client() -> OpenAI:
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=30))
-def gerar_embedding(texto: str) -> list[float]:
+def gerar_embedding(texto: str):
     """Gera vetor de 1536 dimensões para o texto informado."""
     model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     response = _get_client().embeddings.create(model=model, input=texto)
     return response.data[0].embedding
 
 
-def gerar_embedding_artigo(titulo: str, resumo_pt: str) -> list[float]:
+def gerar_embedding_artigo(titulo: str, resumo_pt: str):
     """
     Gera embedding combinando título + resumo para melhor representação semântica.
     O separador de parágrafo melhora a distinção entre título e corpo.
