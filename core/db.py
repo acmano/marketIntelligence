@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Generator
 
 from typing import Optional
+
 import psycopg2
 import psycopg2.pool
 from dotenv import load_dotenv
@@ -30,7 +31,7 @@ def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
             dbname=os.environ["MI_DB_NAME"],
             user=os.environ["MI_DB_USER"],
             password=os.environ["MI_DB_PASSWORD"],
-            options="-c search_path=mi,public",   # schema mi por padrão
+            options="-c search_path=mi,public -c client_encoding=UTF8",
         )
         logger.info("Pool de conexões market_intelligence inicializado.")
     return _pool
@@ -41,16 +42,11 @@ def get_conn() -> Generator[psycopg2.extensions.connection, None, None]:
     """
     Context manager que entrega uma conexão do pool e a devolve ao final,
     fazendo rollback automático em caso de exceção.
-
-    Uso:
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute(...)
-            conn.commit()
     """
     pool = _get_pool()
     conn = pool.getconn()
     try:
+        conn.set_client_encoding("UTF8")
         yield conn
     except Exception:
         conn.rollback()
@@ -65,3 +61,4 @@ def close_pool() -> None:
     if _pool and not _pool.closed:
         _pool.closeall()
         logger.info("Pool de conexões encerrado.")
+

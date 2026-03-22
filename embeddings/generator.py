@@ -35,5 +35,5 @@ def gerar_embedding_artigo(titulo: str, resumo_pt: str):
     """
     if not titulo and not resumo_pt:
         raise ValueError("Título e resumo não podem ser ambos vazios.")
-    texto = f"{titulo}\n\n{resumo_pt}".strip()
+    texto = f"{titulo}\n\n{resumo_pt}".strip().encode('utf-8', errors='ignore').decode('utf-8')
     return gerar_embedding(texto)
