@@ -139,29 +139,74 @@ TICKER_ATIVOS = {
 
 # ── Ticker ────────────────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=300)  # cache de 5 minutos
-def obter_cotacoes() -> List[Dict[str, Any]]:
-    """Busca cotacoes via Yahoo Finance API (requests) com cache de 5 minutos."""
+def _fmt_brl(valor):
+    # type: (float) -> str
+    """Formata numero no padrao brasileiro: ponto milhar, virgula decimal."""
+    # Formata com 2 casas decimais
+    s = "{:,.2f}".format(valor)
+    # Troca: virgula->@, ponto->ponto_milhar, @->virgula_decimal
+    s = s.replace(",", "@").replace(".", ",").replace("@", ".")
+    return s
+
+
+def _fmt_brl_int(valor):
+    # type: (float) -> str
+    """Formata numero inteiro no padrao brasileiro (sem decimais)."""
+    s = "{:,.0f}".format(valor)
+    s = s.replace(",", ".")
+    return s
+
+
+# Ativos que ja sao cotados em BRL (nao converter)
+_ATIVOS_BRL = {"BRL=X", "EURBRL=X", "^BVSP"}
+
+
+@st.cache_data(ttl=120)  # cache de 2 minutos
+def obter_cotacoes():
+    # type: () -> List[Dict[str, Any]]
+    """Busca cotacoes via Yahoo Finance API com conversao para BRL."""
     import requests as _requests
 
-    resultado = []
     headers = {"User-Agent": "Mozilla/5.0"}
 
+    # Primeiro busca USD/BRL para converter os demais
+    usd_brl = None
+    try:
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/BRL=X?interval=1d&range=2d"
+        r = _requests.get(url, headers=headers, timeout=8)
+        meta = r.json()["chart"]["result"][0]["meta"]
+        usd_brl = float(meta["regularMarketPrice"])
+    except Exception:
+        pass
+
+    resultado = []
     for nome, simbolo in TICKER_ATIVOS.items():
         try:
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{simbolo}?interval=1d&range=2d"
+            url = "https://query1.finance.yahoo.com/v8/finance/chart/%s?interval=1d&range=2d" % simbolo
             r = _requests.get(url, headers=headers, timeout=8)
             meta = r.json()["chart"]["result"][0]["meta"]
             preco_hoje = float(meta["regularMarketPrice"])
-            preco_ant  = float(meta["chartPreviousClose"])
-            variacao   = ((preco_hoje - preco_ant) / preco_ant) * 100
+            preco_ant = float(meta["chartPreviousClose"])
+            variacao = ((preco_hoje - preco_ant) / preco_ant) * 100
 
-            if simbolo in ["^BVSP"]:
-                valor_str = f"{preco_hoje:,.0f}"
-            elif simbolo in ["HG=F"]:
-                valor_str = f"{preco_hoje:.4f}"
+            # Converte para BRL se nao e ativo ja em BRL
+            preco_brl = preco_hoje
+            if simbolo not in _ATIVOS_BRL and usd_brl is not None:
+                preco_brl = preco_hoje * usd_brl
+
+            # Formatacao brasileira
+            if simbolo in ("^BVSP", "^GSPC", "^IXIC"):
+                valor_str = _fmt_brl_int(preco_brl)
             else:
-                valor_str = f"{preco_hoje:,.2f}"
+                valor_str = _fmt_brl(preco_brl)
+
+            # Mostra "R$" para valores convertidos, nao para pares cambiais
+            if simbolo in ("BRL=X", "EURBRL=X"):
+                valor_str = "R$ " + valor_str
+            elif simbolo in ("^BVSP", "^GSPC", "^IXIC"):
+                valor_str = valor_str + " pts"
+            elif simbolo not in _ATIVOS_BRL:
+                valor_str = "R$ " + valor_str
 
             resultado.append({
                 "nome": nome,
@@ -175,7 +220,7 @@ def obter_cotacoes() -> List[Dict[str, Any]]:
 
 
 def renderizar_ticker():
-    """Renderiza a barra de ticker no rodape."""
+    """Renderiza a barra de ticker no rodape com auto-refresh a cada 2 minutos."""
     cotacoes = obter_cotacoes()
 
     if not cotacoes:
@@ -202,18 +247,21 @@ def renderizar_ticker():
             seta = "&#9654;"
 
         itens.append(
-            f'<span class="ticker-neu">{c["nome"]}</span> '
-            f'<span class="{cls}">{c["valor"]} {seta} {sinal}{var:.2f}%</span>'
+            '<span class="ticker-neu">%s</span> '
+            '<span class="%s">%s %s %s%s%%</span>'
+            % (c["nome"], cls, c["valor"], seta, sinal, "{:.2f}".format(var).replace(".", ","))
         )
 
     separador = '<span class="ticker-sep">|</span>'
     conteudo = separador.join(itens)
 
-    # Duplica para animacao continua sem lacuna
+    # Ticker + auto-refresh a cada 120s
     st.markdown(
-        f'<div class="ticker-wrapper">'
-        f'<div class="ticker-content">{conteudo}&nbsp;&nbsp;&nbsp;{conteudo}</div>'
-        f'</div>',
+        '<div class="ticker-wrapper">'
+        '<div class="ticker-content">%s&nbsp;&nbsp;&nbsp;%s</div>'
+        '</div>'
+        '<script>setTimeout(function(){window.location.reload();}, 120000);</script>'
+        % (conteudo, conteudo),
         unsafe_allow_html=True,
     )
 
