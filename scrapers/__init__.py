@@ -1,7 +1,8 @@
-"""Scrapers de coleta de notícias por fonte."""
+"""Scrapers de coleta de noticias por fonte."""
 
 from .base_scraper import BaseScraper, ArtigoColetado
 from .rss_scrapers import (
+    RssGenericScraper,
     ReutersScraper,
     IcisScraper,
     PlasticsNewsScraper,
@@ -16,7 +17,7 @@ from .api_scrapers import (
 )
 
 __all__ = [
-    "BaseScraper", "ArtigoColetado",
+    "BaseScraper", "ArtigoColetado", "RssGenericScraper",
     "ReutersScraper", "IcisScraper", "PlasticsNewsScraper",
     "BloombergScraper", "FinancialTimesScraper",
     "WorldBankScraper", "TradeMapScraper",

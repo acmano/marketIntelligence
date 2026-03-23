@@ -2,7 +2,6 @@
 Market Intelligence - Agente Conversacional MVP
 Lorenzetti S.A. | Assessoria a Alta Direcao
 
-RAG: Retrieval-Augmented Generation sobre base de artigos indexados.
 Compativel com Python 3.8+
 
 Executar:
@@ -23,6 +22,10 @@ load_dotenv()
 import anthropic
 from embeddings.generator import gerar_embedding
 from core.db import get_conn
+from core.fontes_repo import (
+    listar_todas, cadastrar_fonte, alternar_ativa,
+    obter_saude_fontes, remover_fonte,
+)
 
 st.set_page_config(
     page_title="Market Intelligence - Lorenzetti",
@@ -60,9 +63,43 @@ st.markdown("""
     }
     .artigo-card a { color: #1B3A6B !important; }
     .artigo-card small { color: #666666 !important; }
+
+    /* Ticker */
+    .ticker-wrapper {
+        position: fixed !important;
+        bottom: 0 !important;
+        left: 0 !important;
+        width: 100% !important;
+        background: #1B3A6B !important;
+        color: #ffffff !important;
+        padding: 6px 0 !important;
+        z-index: 9999 !important;
+        overflow: hidden !important;
+        white-space: nowrap !important;
+        font-size: 0.82rem !important;
+        font-family: monospace !important;
+    }
+    .ticker-content {
+        display: inline-block !important;
+        animation: ticker-scroll 60s linear infinite !important;
+        padding-left: 100% !important;
+    }
+    .ticker-content:hover { animation-play-state: paused !important; }
+    @keyframes ticker-scroll {
+        0%   { transform: translateX(0); }
+        100% { transform: translateX(-100%); }
+    }
+    .ticker-up   { color: #00ff88 !important; font-weight: bold !important; }
+    .ticker-down { color: #ff4444 !important; font-weight: bold !important; }
+    .ticker-neu  { color: #cccccc !important; }
+    .ticker-sep  { color: #4488bb !important; margin: 0 16px !important; }
+
+    /* Espaco no rodape para nao cobrir conteudo */
+    .main .block-container { padding-bottom: 50px !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Constantes ────────────────────────────────────────────────────────────────
 CATEGORIAS = {
     "Todas": None,
     "Materia-Prima": "materia-prima",
@@ -84,6 +121,104 @@ Com base nos artigos fornecidos, faca uma analise preditiva.
 Identifique tendencias, riscos e oportunidades para os proximos 3-6 meses.
 Responda em portugues brasileiro com secoes: Tendencias, Riscos, Oportunidades e Recomendacoes."""
 
+# Ativos para o ticker
+TICKER_ATIVOS = {
+    "USD/BRL":       "BRL=X",
+    "EUR/BRL":       "EURBRL=X",
+    "Ouro":          "GC=F",
+    "Prata":         "SI=F",
+    "Brent":         "BZ=F",
+    "LME Cobre":     "HG=F",
+    "LME Aluminio":  "ALI=F",
+    "LME Zinco":     "ZNC=F",
+    "IBOV":          "^BVSP",
+    "S&P 500":       "^GSPC",
+    "Nasdaq":        "^IXIC",
+}
+
+
+# ── Ticker ────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=300)  # cache de 5 minutos
+def obter_cotacoes() -> List[Dict[str, Any]]:
+    """Busca cotacoes via Yahoo Finance API (requests) com cache de 5 minutos."""
+    import requests as _requests
+
+    resultado = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for nome, simbolo in TICKER_ATIVOS.items():
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{simbolo}?interval=1d&range=2d"
+            r = _requests.get(url, headers=headers, timeout=8)
+            meta = r.json()["chart"]["result"][0]["meta"]
+            preco_hoje = float(meta["regularMarketPrice"])
+            preco_ant  = float(meta["chartPreviousClose"])
+            variacao   = ((preco_hoje - preco_ant) / preco_ant) * 100
+
+            if simbolo in ["^BVSP"]:
+                valor_str = f"{preco_hoje:,.0f}"
+            elif simbolo in ["HG=F"]:
+                valor_str = f"{preco_hoje:.4f}"
+            else:
+                valor_str = f"{preco_hoje:,.2f}"
+
+            resultado.append({
+                "nome": nome,
+                "valor": valor_str,
+                "variacao": variacao,
+            })
+        except Exception:
+            pass
+
+    return resultado
+
+
+def renderizar_ticker():
+    """Renderiza a barra de ticker no rodape."""
+    cotacoes = obter_cotacoes()
+
+    if not cotacoes:
+        st.markdown(
+            '<div class="ticker-wrapper"><div class="ticker-content">'
+            '<span class="ticker-neu">Cotacoes indisponiveis no momento</span>'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    itens = []
+    for c in cotacoes:
+        var = c["variacao"]
+        sinal = "+" if var >= 0 else ""
+        if var > 0.05:
+            cls = "ticker-up"
+            seta = "&#9650;"
+        elif var < -0.05:
+            cls = "ticker-down"
+            seta = "&#9660;"
+        else:
+            cls = "ticker-neu"
+            seta = "&#9654;"
+
+        itens.append(
+            f'<span class="ticker-neu">{c["nome"]}</span> '
+            f'<span class="{cls}">{c["valor"]} {seta} {sinal}{var:.2f}%</span>'
+        )
+
+    separador = '<span class="ticker-sep">|</span>'
+    conteudo = separador.join(itens)
+
+    # Duplica para animacao continua sem lacuna
+    st.markdown(
+        f'<div class="ticker-wrapper">'
+        f'<div class="ticker-content">{conteudo}&nbsp;&nbsp;&nbsp;{conteudo}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ── Backend ───────────────────────────────────────────────────────────────────
 
 @st.cache_resource
 def get_anthropic_client():
@@ -176,34 +311,270 @@ def obter_estatisticas():
     return {"total_artigos": total_artigos, "total_embeddings": total_embeddings, "ultima_coleta": ultima_coleta}
 
 
-def main():
+# ── Categorias de fonte (enum do banco) ──────────────────────────────────────
+CATEGORIAS_FONTE = [
+    "petroquimica",
+    "industria_plastica",
+    "comercio_exterior",
+    "economia_global",
+    "geopolitica",
+    "setor_nacional",
+]
+
+TIPOS_FONTE = ["rss", "api", "scraping"]
+
+
+# ── Pagina: Gerenciar Fontes ─────────────────────────────────────────────────
+
+def _gerar_slug(nome):
+    # type: (str) -> str
+    """Gera slug a partir do nome: lowercase, espacos viram hifens, remove acentos."""
+    import re
+    import unicodedata
+    slug = unicodedata.normalize("NFKD", nome).encode("ascii", "ignore").decode("ascii")
+    slug = slug.lower().strip()
+    slug = re.sub(r"[^a-z0-9\s-]", "", slug)
+    slug = re.sub(r"[\s_]+", "-", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug
+
+
+def _testar_feed_rss(url_rss, usuario=None, senha=None):
+    # type: (str, ..., ...) -> dict
+    """Testa um feed RSS e retorna resultado com status e exemplos de artigos."""
+    import feedparser
+    import requests as _requests
+    try:
+        auth = (usuario, senha) if usuario and senha else None
+        resp = _requests.get(
+            url_rss, timeout=10,
+            headers={"User-Agent": "Mozilla/5.0"},
+            auth=auth,
+        )
+        if resp.status_code == 401:
+            return {"ok": False, "erro": "HTTP 401 - Autenticacao necessaria. Informe usuario e senha."}
+        if resp.status_code == 403:
+            return {"ok": False, "erro": "HTTP 403 - Acesso negado. Verifique as credenciais."}
+        if resp.status_code != 200:
+            return {"ok": False, "erro": "HTTP %d ao acessar a URL." % resp.status_code}
+
+        feed = feedparser.parse(resp.content)
+
+        if feed.bozo and not feed.entries:
+            return {"ok": False, "erro": "Feed invalido: %s" % str(feed.bozo_exception)}
+
+        total = len(feed.entries)
+        if total == 0:
+            return {"ok": False, "erro": "Feed acessivel mas sem artigos (0 entries)."}
+
+        exemplos = []
+        for entry in feed.entries[:5]:
+            titulo = entry.get("title", "").strip()
+            if titulo:
+                exemplos.append(titulo)
+
+        return {"ok": True, "total": total, "exemplos": exemplos}
+    except _requests.exceptions.Timeout:
+        return {"ok": False, "erro": "Timeout ao acessar a URL (10s)."}
+    except _requests.exceptions.ConnectionError:
+        return {"ok": False, "erro": "Nao foi possivel conectar a URL."}
+    except Exception as e:
+        return {"ok": False, "erro": str(e)}
+
+
+def pagina_fontes():
+    st.markdown('<p class="titulo-principal">Gerenciar Fontes de Pesquisa</p>', unsafe_allow_html=True)
+
+    # ── Saude das fontes ─────────────────────────────────────────────────
+    st.markdown("### Saude da Coleta")
+    try:
+        saude = obter_saude_fontes()
+        if saude:
+            for s in saude:
+                ultima = s["ultima_coleta"]
+                ultima_str = ultima.strftime("%d/%m %H:%M") if ultima else "Nunca"
+                erro = s["ultimo_erro"]
+                erro_str = erro.strftime("%d/%m %H:%M") if erro else "Nenhum"
+                status_icon = "🔴" if not s["ativa"] else ("🟢" if s["artigos_24h"] and s["artigos_24h"] > 0 else "🟡")
+
+                col1, col2, col3, col4, col5 = st.columns([3, 1, 1, 2, 2])
+                col1.write(f"{status_icon} **{s['nome']}**")
+                col2.write(str(s["artigos_total"] or 0))
+                col3.write(str(s["artigos_24h"] or 0))
+                col4.caption("Ultima: %s" % ultima_str)
+                col5.caption("Erro: %s" % erro_str)
+        else:
+            st.info("Nenhuma fonte cadastrada.")
+    except Exception as e:
+        st.error("Erro ao carregar saude: %s" % e)
+
+    st.divider()
+
+    # ── Listagem e toggle ativa/inativa ──────────────────────────────────
+    st.markdown("### Fontes Cadastradas")
+    try:
+        fontes = listar_todas()
+    except Exception as e:
+        st.error("Erro ao listar fontes: %s" % e)
+        return
+
+    if not fontes:
+        st.info("Nenhuma fonte cadastrada.")
+    else:
+        for fonte in fontes:
+            with st.container():
+                col1, col2, col3, col4 = st.columns([4, 2, 2, 2])
+                col1.write("**%s** (`%s`)" % (fonte.nome, fonte.slug))
+                col2.write("`%s` | `%s`" % (fonte.tipo, fonte.categoria))
+                if fonte.url_rss:
+                    col3.caption(fonte.url_rss[:40] + "..." if len(fonte.url_rss) > 40 else fonte.url_rss)
+                else:
+                    col3.caption("Sem RSS")
+
+                # Toggle ativa/inativa
+                btn_key = "toggle_%s" % fonte.slug
+                if fonte.ativa:
+                    if col4.button("Desativar", key=btn_key, type="secondary"):
+                        alternar_ativa(fonte.slug, False)
+                        st.rerun()
+                else:
+                    if col4.button("Ativar", key=btn_key, type="primary"):
+                        alternar_ativa(fonte.slug, True)
+                        st.rerun()
+
+    st.divider()
+
+    # ── Formulario de nova fonte ─────────────────────────────────────────
+    st.markdown("### Adicionar Nova Fonte")
+
+    # Estado: None=nao testado, dict com ok=True/False
+    if "_teste_rss" not in st.session_state:
+        st.session_state["_teste_rss"] = None
+    # Dados da fonte que passou no teste (para o botao Adicionar)
+    if "_fonte_testada" not in st.session_state:
+        st.session_state["_fonte_testada"] = None
+
+    col_a, col_b = st.columns(2)
+    novo_nome = col_a.text_input("Nome da fonte *", placeholder="Ex: Chemical Week")
+    novo_slug = col_b.text_input(
+        "Slug (auto-gerado se vazio)",
+        placeholder="Ex: chemical-week",
+    )
+    col_c, col_d = st.columns(2)
+    novo_tipo = col_c.selectbox("Tipo *", TIPOS_FONTE)
+    nova_categoria = col_d.selectbox("Categoria *", CATEGORIAS_FONTE)
+    novo_url_base = st.text_input("URL do site *", placeholder="https://www.chemweek.com")
+    novo_url_rss = st.text_input(
+        "URL do feed RSS" + (" *" if novo_tipo == "rss" else " (opcional)"),
+        placeholder="https://www.chemweek.com/rss",
+    )
+
+    # Campos de autenticacao (colapsados por padrao)
+    with st.expander("Autenticacao HTTP (opcional)"):
+        st.caption("Preencha apenas se o feed exigir login e senha (HTTP Basic Auth).")
+        col_u, col_p = st.columns(2)
+        novo_usuario = col_u.text_input("Usuario", placeholder="usuario")
+        nova_senha = col_p.text_input("Senha", type="password", placeholder="senha")
+
+    # Detecta se o usuario mudou os dados do formulario apos um teste
+    _dados_atuais = (novo_nome, novo_url_rss, novo_usuario, nova_senha)
+    if st.session_state.get("_dados_ultimo_teste") != _dados_atuais:
+        # Dados mudaram — invalida teste anterior
+        if st.session_state["_teste_rss"] is not None:
+            st.session_state["_teste_rss"] = None
+            st.session_state["_fonte_testada"] = None
+
+    teste = st.session_state.get("_teste_rss")
+    teste_ok = teste is not None and teste.get("ok", False)
+
+    if not teste_ok:
+        # ── Botao: Testar Feed ───────────────────────────────────────
+        if st.button("Testar Feed", type="primary"):
+            if not novo_nome or not novo_url_base:
+                st.error("Nome e URL do site sao obrigatorios.")
+            elif novo_tipo == "rss" and (not novo_url_rss or not novo_url_rss.strip()):
+                st.error("URL do feed RSS e obrigatoria para fontes do tipo RSS.")
+            elif not novo_url_rss or not novo_url_rss.strip():
+                st.warning("URL do feed RSS nao informada. Nao e possivel testar.")
+            else:
+                with st.spinner("Testando feed RSS..."):
+                    usuario = novo_usuario.strip() if novo_usuario.strip() else None
+                    senha = nova_senha.strip() if nova_senha.strip() else None
+                    resultado = _testar_feed_rss(novo_url_rss.strip(), usuario, senha)
+                    st.session_state["_teste_rss"] = resultado
+                    st.session_state["_dados_ultimo_teste"] = _dados_atuais
+                    if resultado["ok"]:
+                        slug_final = novo_slug.strip() if novo_slug.strip() else _gerar_slug(novo_nome)
+                        st.session_state["_fonte_testada"] = {
+                            "nome": novo_nome.strip(),
+                            "slug": slug_final,
+                            "url_base": novo_url_base.strip(),
+                            "tipo": novo_tipo,
+                            "categoria": nova_categoria,
+                            "url_rss": novo_url_rss.strip(),
+                            "rss_usuario": usuario,
+                            "rss_senha": senha,
+                        }
+                    st.rerun()
+    else:
+        # ── Botao: Adicionar Fonte (teste passou) ────────────────────
+        if st.button("Adicionar Fonte", type="primary"):
+            dados = st.session_state["_fonte_testada"]
+            try:
+                fonte_criada = cadastrar_fonte(
+                    nome=dados["nome"],
+                    slug=dados["slug"],
+                    url_base=dados["url_base"],
+                    tipo=dados["tipo"],
+                    categoria=dados["categoria"],
+                    url_rss=dados["url_rss"],
+                    rss_usuario=dados["rss_usuario"],
+                    rss_senha=dados["rss_senha"],
+                )
+                st.session_state["_teste_rss"] = None
+                st.session_state["_fonte_testada"] = None
+                st.session_state["_dados_ultimo_teste"] = None
+                st.success(
+                    "Fonte '%s' cadastrada com sucesso (slug: %s). "
+                    "Sera coletada na proxima execucao da DAG."
+                    % (fonte_criada.nome, fonte_criada.slug)
+                )
+                st.rerun()
+            except ValueError as ve:
+                st.error(str(ve))
+            except Exception as e:
+                msg = str(e)
+                if "fontes_slug_uk" in msg:
+                    st.error("Ja existe uma fonte com o slug '%s'." % dados["slug"])
+                elif "fontes_nome_uk" in msg:
+                    st.error("Ja existe uma fonte com o nome '%s'." % dados["nome"])
+                else:
+                    st.error("Erro ao cadastrar: %s" % e)
+
+    # ── Resultado do teste ───────────────────────────────────────────
+    if teste is not None:
+        if teste["ok"]:
+            st.success(
+                "Feed valido! %d artigos encontrados. Exemplos:" % teste["total"]
+            )
+            for titulo in teste["exemplos"]:
+                st.markdown("- %s" % titulo)
+        else:
+            st.error("Falha no teste: %s" % teste["erro"])
+
+
+# ── Pagina: Chat (original) ──────────────────────────────────────────────────
+
+def pagina_chat():
     if "historico" not in st.session_state:
         st.session_state.historico = []
 
-    with st.sidebar:
-        st.markdown("### Market Intelligence")
-        st.markdown("**Lorenzetti S.A.** | Assessoria a Alta Direcao")
-        st.divider()
-        st.markdown("#### Filtros")
-        categoria_label = st.selectbox("Categoria", list(CATEGORIAS.keys()))
-        categoria = CATEGORIAS[categoria_label]
-        dias = st.slider("Periodo (dias)", 7, 365, 90)
-        top_k = st.slider("Artigos por consulta", 3, 15, 8)
-        modo_preditivo = st.toggle("Modo Analise Preditiva", value=False)
-        st.divider()
-        st.markdown("#### Base de Dados")
-        try:
-            stats = obter_estatisticas()
-            st.metric("Artigos coletados", stats["total_artigos"])
-            st.metric("Artigos vetorizados", stats["total_embeddings"])
-            if stats["ultima_coleta"]:
-                st.caption(f"Ultima coleta: {stats['ultima_coleta'].strftime('%d/%m %H:%M')}")
-        except Exception:
-            st.caption("Estatisticas indisponiveis")
-        st.divider()
-        if st.button("Limpar conversa"):
-            st.session_state.historico = []
-            st.rerun()
+    # Filtros na sidebar (adicionados pela main)
+    categoria_label = st.session_state.get("_filtro_categoria", "Todas")
+    categoria = CATEGORIAS[categoria_label]
+    dias = st.session_state.get("_filtro_dias", 90)
+    top_k = st.session_state.get("_filtro_top_k", 8)
+    modo_preditivo = st.session_state.get("_filtro_preditivo", False)
 
     st.markdown('<p class="titulo-principal">Market Intelligence - Agente Conversacional</p>', unsafe_allow_html=True)
     if modo_preditivo:
@@ -237,25 +608,72 @@ def main():
 
                     if artigos:
                         st.markdown("---")
-                        st.markdown(f"**Fontes consultadas ({len(artigos)} artigos):**")
+                        st.markdown("**Fontes consultadas (%d artigos):**" % len(artigos))
                         for a in artigos:
                             data = a["data_publicacao"].strftime("%d/%m/%Y") if a["data_publicacao"] else "s/d"
                             st.markdown(
-                                f'<div class="artigo-card">'
-                                f'<span class="fonte-tag">{a["fonte_nome"]}</span> '
-                                f'<span class="fonte-tag">{a["categoria"]}</span> '
-                                f'<span class="score-badge">score {a["relevancia"]}</span> '
-                                f'<span class="score-badge">sim {a["similaridade"]:.2f}</span><br>'
-                                f'<a href="{a["url"]}" target="_blank">{a["titulo"]}</a> '
-                                f'<small style="color:#666666;">({data})</small>'
-                                f'</div>',
+                                '<div class="artigo-card">'
+                                '<span class="fonte-tag">%s</span> '
+                                '<span class="fonte-tag">%s</span> '
+                                '<span class="score-badge">score %s</span> '
+                                '<span class="score-badge">sim %.2f</span><br>'
+                                '<a href="%s" target="_blank">%s</a> '
+                                '<small style="color:#666666;">(%s)</small>'
+                                '</div>'
+                                % (a["fonte_nome"], a["categoria"], a["relevancia"],
+                                   a["similaridade"], a["url"], a["titulo"], data),
                                 unsafe_allow_html=True,
                             )
 
                     st.session_state.historico.append({"role": "assistant", "content": resposta})
 
                 except Exception as e:
-                    st.error(f"Erro: {e}")
+                    st.error("Erro: %s" % e)
+
+    # Ticker no rodape
+    renderizar_ticker()
+
+
+# ── Interface principal ───────────────────────────────────────────────────────
+
+def main():
+    with st.sidebar:
+        st.markdown("### Market Intelligence")
+        st.markdown("**Lorenzetti S.A.** | Assessoria a Alta Direcao")
+        st.divider()
+
+        pagina = st.radio(
+            "Navegar",
+            ["Chat", "Gerenciar Fontes"],
+            label_visibility="collapsed",
+        )
+        st.divider()
+
+        if pagina == "Chat":
+            st.markdown("#### Filtros")
+            st.session_state["_filtro_categoria"] = st.selectbox("Categoria", list(CATEGORIAS.keys()))
+            st.session_state["_filtro_dias"] = st.slider("Periodo (dias)", 7, 365, 90)
+            st.session_state["_filtro_top_k"] = st.slider("Artigos por consulta", 3, 15, 8)
+            st.session_state["_filtro_preditivo"] = st.toggle("Modo Analise Preditiva", value=False)
+            st.divider()
+            st.markdown("#### Base de Dados")
+            try:
+                stats = obter_estatisticas()
+                st.metric("Artigos coletados", stats["total_artigos"])
+                st.metric("Artigos vetorizados", stats["total_embeddings"])
+                if stats["ultima_coleta"]:
+                    st.caption("Ultima coleta: %s" % stats["ultima_coleta"].strftime("%d/%m %H:%M"))
+            except Exception:
+                st.caption("Estatisticas indisponiveis")
+            st.divider()
+            if st.button("Limpar conversa"):
+                st.session_state.historico = []
+                st.rerun()
+
+    if pagina == "Chat":
+        pagina_chat()
+    else:
+        pagina_fontes()
 
 
 if __name__ == "__main__":
