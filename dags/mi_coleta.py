@@ -1,21 +1,24 @@
 """
 DAG: mi_coleta
-Descrição: Coleta diária de notícias de todas as fontes ativas.
-Agendamento: diário às 06h00 BRT (09h UTC)
-
-As fontes são resolvidas dinamicamente do banco — nenhum slug ou ID
-está hardcoded aqui. Para adicionar uma nova fonte: cadastre em mi.fontes
-e crie o scraper correspondente no mapa SCRAPER_POR_SLUG abaixo.
+Descricao: Coleta diaria de noticias de todas as fontes ativas.
+Agendamento: diario as 06h00 BRT (09h UTC)
+Ao terminar com sucesso, dispara automaticamente mi_processamento.
+Compativel com Python 3.8+
 """
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Type
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from dotenv import load_dotenv
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+MI_ROOT = os.environ.get("MI_PROJECT_ROOT", "/home/mano/projetos/datasul/marketIntelligence")
+sys.path.insert(0, MI_ROOT)
+load_dotenv(os.path.join(MI_ROOT, ".env"))
 
 from scrapers import (
     ReutersScraper, IcisScraper, PlasticsNewsScraper,
@@ -23,22 +26,19 @@ from scrapers import (
     WorldBankScraper, TradeMapScraper,
     AbiplastScraper, AbiquimScraper,
 )
+from scrapers.base_scraper import BaseScraper
 from core import get_conn
 
-# -----------------------------------------------------------------------------
-# Mapa slug → classe scraper
-# Adicionar nova fonte: registrar aqui e criar o scraper em scrapers/
-# -----------------------------------------------------------------------------
 SCRAPER_POR_SLUG: Dict[str, Type[BaseScraper]] = {
-    "reuters-commodities":  ReutersScraper,
-    "icis":                 IcisScraper,
-    "plastics-news":        PlasticsNewsScraper,
-    "bloomberg":            BloombergScraper,
-    "financial-times":      FinancialTimesScraper,
-    "world-bank":           WorldBankScraper,
-    "trademap":             TradeMapScraper,
-    "abiplast":             AbiplastScraper,
-    "abiquim":              AbiquimScraper,
+    "reuters-commodities": ReutersScraper,
+    "icis":                IcisScraper,
+    "plastics-news":       PlasticsNewsScraper,
+    "bloomberg":           BloombergScraper,
+    "financial-times":     FinancialTimesScraper,
+    "world-bank":          WorldBankScraper,
+    "trademap":            TradeMapScraper,
+    "abiplast":            AbiplastScraper,
+    "abiquim":             AbiquimScraper,
 }
 
 DEFAULT_ARGS = {
@@ -53,20 +53,12 @@ DEFAULT_ARGS = {
 
 
 def executar_coleta(slug: str, **context) -> dict:
-    """
-    Task callable: instancia o scraper pelo slug e executa a coleta.
-    Registra resultado em mi.execucoes_log.
-    """
-    from datetime import timezone
     from loguru import logger
-
     if slug not in SCRAPER_POR_SLUG:
-        raise ValueError(f"Slug '{slug}' não mapeado em SCRAPER_POR_SLUG.")
-
+        raise ValueError(f"Slug '{slug}' nao mapeado em SCRAPER_POR_SLUG.")
     scraper = SCRAPER_POR_SLUG[slug]()
     inicio = datetime.now(tz=timezone.utc)
     status, novos, erro = "success", 0, None
-
     try:
         novos = scraper.executar()
     except Exception as exc:
@@ -75,47 +67,33 @@ def executar_coleta(slug: str, **context) -> dict:
         logger.error(f"[{slug}] Falha na coleta: {exc}")
         raise
     finally:
-        # Registra no log independente de sucesso ou falha
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     INSERT INTO mi.execucoes_log
                         (dag_id, fonte_id, status, qtd_novos, erro, iniciado_em, finalizado_em)
-                    SELECT
-                        %s,
-                        (SELECT id FROM mi.fontes WHERE slug = %s),
-                        %s::mi.status_execucao,
-                        %s,
-                        %s,
-                        %s,
-                        NOW()
+                    SELECT %s,
+                           (SELECT id FROM mi.fontes WHERE slug = %s),
+                           %s::mi.status_execucao,
+                           %s, %s, %s, NOW()
                     """,
                     ("mi_coleta", slug, status, novos, erro, inicio),
                 )
             conn.commit()
-
     return {"slug": slug, "novos": novos, "status": status}
 
 
-def carregar_fontes_ativas() -> list[str]:
-    """
-    Retorna slugs das fontes ativas no banco que possuem scraper mapeado.
-    Nunca hardcoded — sempre lido do banco em runtime.
-    """
+def carregar_fontes_ativas() -> List[str]:
     from core.fontes_repo import listar_ativas
     ativas = listar_ativas()
     return [f.slug for f in ativas if f.slug in SCRAPER_POR_SLUG]
 
 
-# -----------------------------------------------------------------------------
-# Definição da DAG
-# As tasks são criadas dinamicamente com base nas fontes ativas no banco.
-# -----------------------------------------------------------------------------
 with DAG(
     dag_id="mi_coleta",
-    description="Market Intelligence — Coleta diária de notícias",
-    schedule_interval="0 9 * * *",   # 06h BRT = 09h UTC
+    description="Market Intelligence -- Coleta diaria de noticias",
+    schedule="0 9 * * *",
     start_date=datetime(2026, 3, 23),
     catchup=False,
     max_active_runs=1,
@@ -125,10 +103,22 @@ with DAG(
 
     slugs_ativos = carregar_fontes_ativas()
 
+    tasks_coleta = []
     for slug in slugs_ativos:
-        PythonOperator(
+        t = PythonOperator(
             task_id=f"coletar_{slug.replace('-', '_')}",
             python_callable=executar_coleta,
             op_kwargs={"slug": slug},
-            pool="mi_scrapers",   # pool com 3 slots — criar no Airflow Admin
         )
+        tasks_coleta.append(t)
+
+    # Dispara mi_processamento apos todas as coletas terminarem com sucesso
+    trigger_processamento = TriggerDagRunOperator(
+        task_id="disparar_processamento",
+        trigger_dag_id="mi_processamento",
+        wait_for_completion=False,
+    )
+
+    # Todas as tasks de coleta >> trigger
+    if tasks_coleta:
+        tasks_coleta >> trigger_processamento
