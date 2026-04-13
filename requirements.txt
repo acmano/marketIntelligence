@@ -33,6 +33,6 @@ loguru==0.7.2          # logging aprimorado
 schedule==1.2.1        # agendamento simples para testes locais
 
 # Testes
-pytest==8.2.0
+pytest==9.0.3
 pytest-mock==3.14.0
 responses==0.25.0      # mock de chamadas HTTP
