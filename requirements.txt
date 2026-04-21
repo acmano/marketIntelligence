@@ -27,7 +27,7 @@ python-pptx==0.6.23
 streamlit==1.35.0
 
 # Utilitários
-python-dotenv==1.0.1
+python-dotenv==1.2.2
 tenacity==8.3.0        # retry automático com backoff
 loguru==0.7.2          # logging aprimorado
 schedule==1.2.1        # agendamento simples para testes locais
